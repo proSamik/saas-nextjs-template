@@ -6,6 +6,7 @@ This API route handles Stripe webhook events to manage subscription status chang
 
 import {
   manageSubscriptionStatusChange,
+  processStripeCreditsPayment,
   updateStripeCustomer
 } from "@/actions/stripe-actions"
 import { stripe } from "@/lib/stripe"
@@ -15,12 +16,13 @@ import Stripe from "stripe"
 const relevantEvents = new Set([
   "checkout.session.completed",
   "customer.subscription.updated",
-  "customer.subscription.deleted"
+  "customer.subscription.deleted",
+  "payment_intent.succeeded"
 ])
 
 export async function POST(req: Request) {
   const body = await req.text()
-  const sig = (await headers()).get("Stripe-Signature") as string
+  const sig = req.headers.get("stripe-signature") as string
   const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET
   let event: Stripe.Event
 
@@ -45,6 +47,10 @@ export async function POST(req: Request) {
 
         case "checkout.session.completed":
           await handleCheckoutSession(event)
+          break
+
+        case "payment_intent.succeeded":
+          await handlePaymentIntentSucceeded(event)
           break
 
         default:
@@ -76,6 +82,7 @@ async function handleSubscriptionChange(event: Stripe.Event) {
 
 async function handleCheckoutSession(event: Stripe.Event) {
   const checkoutSession = event.data.object as Stripe.Checkout.Session
+  
   if (checkoutSession.mode === "subscription") {
     const subscriptionId = checkoutSession.subscription as string
     await updateStripeCustomer(
@@ -93,6 +100,41 @@ async function handleCheckoutSession(event: Stripe.Event) {
       subscription.id,
       subscription.customer as string,
       productId
+    )
+  } else if (checkoutSession.mode === "payment") {
+    // This is a one-time payment, likely for credits
+    // Check for payment intent
+    if (checkoutSession.payment_intent && checkoutSession.client_reference_id) {
+      // Get the line items to determine the credits amount
+      const lineItems = await stripe.checkout.sessions.listLineItems(checkoutSession.id)
+      if (lineItems.data.length > 0) {
+        // Get the first line item quantity - this should be the number of credits
+        const creditsAmount = lineItems.data[0].quantity || 0
+
+        // Process the credits payment
+        await processStripeCreditsPayment(
+          checkoutSession.client_reference_id,
+          creditsAmount,
+          checkoutSession.payment_intent as string
+        )
+      }
+    }
+  }
+}
+
+async function handlePaymentIntentSucceeded(event: Stripe.Event) {
+  const paymentIntent = event.data.object as Stripe.PaymentIntent
+  
+  // Check if this is a payment for credits
+  if (paymentIntent.metadata?.type === "credits" && paymentIntent.metadata.userId && paymentIntent.metadata.amount) {
+    const userId = paymentIntent.metadata.userId
+    const creditsAmount = parseInt(paymentIntent.metadata.amount, 10)
+    
+    // Process the credits payment
+    await processStripeCreditsPayment(
+      userId,
+      creditsAmount,
+      paymentIntent.id
     )
   }
 }

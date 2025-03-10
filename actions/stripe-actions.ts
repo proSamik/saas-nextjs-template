@@ -12,6 +12,9 @@ import { SelectProfile } from "@/db/schema"
 import { createPlanCheckoutSession, createBillingPortalSession, PlanType, stripe } from "@/lib/stripe"
 import { ActionState } from "@/types"
 import Stripe from "stripe"
+import { eq } from "drizzle-orm"
+import { profilesTable } from "@/db/schema"
+import { db } from "@/db/db"
 
 type MembershipStatus = SelectProfile["membership"]
 
@@ -189,5 +192,67 @@ export const manageSubscriptionStatusChange = async (
     throw error instanceof Error
       ? error
       : new Error("Failed to update subscription status")
+  }
+}
+
+/**
+ * Processes a one-time purchase of credits
+ */
+export async function processStripeCreditsPayment(
+  userId: string,
+  amount: number,
+  paymentIntentId: string
+): Promise<ActionState<SelectProfile>> {
+  try {
+    if (!userId || !amount || !paymentIntentId) {
+      throw new Error("Missing required parameters for processStripeCreditsPayment")
+    }
+
+    // Get the payment intent to verify the payment
+    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId)
+    
+    if (paymentIntent.status !== "succeeded") {
+      return {
+        isSuccess: false,
+        message: `Payment not successful. Status: ${paymentIntent.status}`
+      }
+    }
+
+    // Get the current profile to calculate new credits amount
+    const profileResult = await db.query.profiles.findFirst({
+      where: eq(profilesTable.userId, userId)
+    })
+
+    if (!profileResult) {
+      return {
+        isSuccess: false,
+        message: "User profile not found"
+      }
+    }
+
+    // Update the user's profile with credits
+    const newCredits = (profileResult.credits || 0) + amount
+    
+    const result = await updateProfileAction(userId, {
+      credits: newCredits,
+      lastCreditPurchase: new Date(),
+      paymentProvider: "stripe"
+    })
+
+    if (!result.isSuccess) {
+      throw new Error("Failed to update user credits")
+    }
+
+    return {
+      isSuccess: true,
+      message: `Successfully added ${amount} credits`,
+      data: result.data
+    }
+  } catch (error) {
+    console.error("Error processing Stripe credits payment:", error)
+    return {
+      isSuccess: false,
+      message: "Failed to process credits payment"
+    }
   }
 }

@@ -6,6 +6,7 @@ This API route handles LemonSqueezy webhook events to manage subscription status
 
 import {
   manageLemonSqueezySubscriptionStatusChange,
+  processLemonSqueezyCreditsPayment,
   updateLemonSqueezyCustomer
 } from "@/actions/lemonsqueezy-actions"
 import { headers } from "next/headers"
@@ -20,7 +21,8 @@ const relevantEvents = new Set([
   "subscription_expired",
   "subscription_paused",
   "subscription_unpaused",
-  "order_created"
+  "order_created",
+  "order_refunded"
 ])
 
 export async function POST(req: Request) {
@@ -44,28 +46,20 @@ export async function POST(req: Request) {
         switch (event.meta.event_name) {
           case "subscription_created":
           case "subscription_updated":
-          case "subscription_resumed":
-          case "subscription_unpaused":
-            await handleSubscriptionActive(event)
-            break
-            
           case "subscription_cancelled":
-            await handleSubscriptionCancelled(event)
-            break
-            
+          case "subscription_resumed":
           case "subscription_expired":
-            await handleSubscriptionExpired(event)
-            break
-            
           case "subscription_paused":
-            await handleSubscriptionPaused(event)
+          case "subscription_unpaused":
+            await handleSubscriptionChange(event)
             break
 
           case "order_created":
-            if (event.data.attributes.first_order_item &&
-                event.data.attributes.first_order_item.subscription_id) {
-              await handleOrderCreated(event)
-            }
+            await handleOrderCreated(event)
+            break
+            
+          case "order_refunded":
+            await handleOrderRefunded(event)
             break
 
           default:
@@ -90,9 +84,9 @@ export async function POST(req: Request) {
 }
 
 /**
- * Handles active subscription events (created, updated, resumed, unpaused)
+ * Handles subscription changes (created, updated, cancelled, etc.)
  */
-async function handleSubscriptionActive(event: any) {
+async function handleSubscriptionChange(event: any) {
   const subscription = event.data
   const subscriptionId = subscription.id
   const customerId = subscription.attributes.customer_id.toString()
@@ -113,62 +107,7 @@ async function handleSubscriptionActive(event: any) {
 }
 
 /**
- * Handles subscription cancelled event
- */
-async function handleSubscriptionCancelled(event: any) {
-  const subscription = event.data
-  const subscriptionId = subscription.id
-  const customerId = subscription.attributes.customer_id.toString()
-  
-  // When a subscription is cancelled, it remains active until the end of the billing period
-  // We'll set it to "free" status only after it expires
-  await manageLemonSqueezySubscriptionStatusChange(
-    subscriptionId,
-    customerId,
-    "pro" // Keep as pro until it expires
-  )
-  
-  console.log(`Subscription cancelled for customer ${customerId}`)
-}
-
-/**
- * Handles subscription expired event
- */
-async function handleSubscriptionExpired(event: any) {
-  const subscription = event.data
-  const subscriptionId = subscription.id
-  const customerId = subscription.attributes.customer_id.toString()
-  
-  // When a subscription expires, downgrade to free
-  await manageLemonSqueezySubscriptionStatusChange(
-    subscriptionId,
-    customerId,
-    "free"
-  )
-  
-  console.log(`Subscription expired for customer ${customerId}`)
-}
-
-/**
- * Handles subscription paused event
- */
-async function handleSubscriptionPaused(event: any) {
-  const subscription = event.data
-  const subscriptionId = subscription.id
-  const customerId = subscription.attributes.customer_id.toString()
-  
-  // When a subscription is paused, downgrade to free
-  await manageLemonSqueezySubscriptionStatusChange(
-    subscriptionId,
-    customerId,
-    "free"
-  )
-  
-  console.log(`Subscription paused for customer ${customerId}`)
-}
-
-/**
- * Handles new order with subscription
+ * Handles new order with subscription or credits
  */
 async function handleOrderCreated(event: any) {
   const order = event.data
@@ -180,17 +119,54 @@ async function handleOrderCreated(event: any) {
     return
   }
   
-  const subscriptionId = order.attributes.first_order_item.subscription_id
-
-  if (subscriptionId) {
+  // Check if this is a subscription or one-time purchase
+  const firstOrderItem = order.attributes.first_order_item
+  
+  if (firstOrderItem.subscription_id) {
+    // This is a subscription purchase
     await updateLemonSqueezyCustomer(
       userId,
-      subscriptionId,
+      firstOrderItem.subscription_id,
       customerId
     )
+  } else {
+    // This is likely a credits purchase
+    // Check the variant name or product name to determine if it's credits
+    const variantName = firstOrderItem.variant_name.toLowerCase()
     
-    console.log(`Order created with subscription for user ${userId}, customer ${customerId}`)
+    if (variantName.includes('credit') || variantName.includes('token')) {
+      // Determine credits amount from variant name or metadata
+      let creditsAmount = 0
+      
+      // Try to extract amount from variant name (e.g. "10 Credits")
+      const match = variantName.match(/(\d+)\s*credits?/i)
+      if (match && match[1]) {
+        creditsAmount = parseInt(match[1], 10)
+      } else {
+        // Default amount based on variant ID
+        const variantId = firstOrderItem.variant_id.toString()
+        if (variantId === process.env.LEMONSQUEEZY_VARIANT_ID_CREDITS_10) {
+          creditsAmount = 10
+        }
+      }
+      
+      if (creditsAmount > 0) {
+        await processLemonSqueezyCreditsPayment(
+          userId,
+          creditsAmount,
+          order.id
+        )
+      }
+    }
   }
+}
+
+/**
+ * Handles refunded orders
+ */
+async function handleOrderRefunded(event: any) {
+  // You could implement logic to remove credits for refunded orders
+  console.log("Order refunded, implement credits removal if needed")
 }
 
 /**

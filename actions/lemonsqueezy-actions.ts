@@ -11,6 +11,9 @@ import {
 import { SelectProfile } from "@/db/schema"
 import { lemonsqueezy, LemonSqueezySubscription } from "@/lib/lemonsqueezy"
 import { ActionState } from "@/types"
+import { eq } from "drizzle-orm"
+import { db } from "@/db/db"
+import { profilesTable } from "@/db/schema"
 
 type MembershipStatus = SelectProfile["membership"]
 
@@ -192,5 +195,57 @@ export const manageLemonSqueezySubscriptionStatusChange = async (
     throw error instanceof Error
       ? error
       : new Error("Failed to update subscription status")
+  }
+}
+
+/**
+ * Processes a one-time purchase of credits
+ */
+export async function processLemonSqueezyCreditsPayment(
+  userId: string,
+  amount: number,
+  orderId: string
+): Promise<ActionState<SelectProfile>> {
+  try {
+    if (!userId || !amount || !orderId) {
+      throw new Error("Missing required parameters for processLemonSqueezyCreditsPayment")
+    }
+
+    // Get the current profile to calculate new credits amount
+    const profileResult = await db.query.profiles.findFirst({
+      where: eq(profilesTable.userId, userId)
+    })
+
+    if (!profileResult) {
+      return {
+        isSuccess: false,
+        message: "User profile not found"
+      }
+    }
+
+    // Update the user's profile with credits
+    const newCredits = (profileResult.credits || 0) + amount
+    
+    const result = await updateProfileAction(userId, {
+      credits: newCredits,
+      lastCreditPurchase: new Date(),
+      paymentProvider: "lemonsqueezy"
+    })
+
+    if (!result.isSuccess) {
+      throw new Error("Failed to update user credits")
+    }
+
+    return {
+      isSuccess: true,
+      message: `Successfully added ${amount} credits`,
+      data: result.data
+    }
+  } catch (error) {
+    console.error("Error processing LemonSqueezy credits payment:", error)
+    return {
+      isSuccess: false,
+      message: "Failed to process credits payment"
+    }
   }
 } 
