@@ -18,7 +18,9 @@ import {
 import { cn } from "@/lib/utils"
 import PaymentProviderSelector from "@/components/payment-provider-selector"
 import { auth, currentUser } from "@clerk/nextjs/server"
-import { createCheckoutSession } from "@/lib/lemonsqueezy"
+import { createLemonSqueezyCheckoutSessionAction } from "@/actions/lemonsqueezy-actions"
+import { createStripeCheckoutSessionAction } from "@/actions/stripe-actions"
+import { PlanType } from "@/lib/stripe"
 
 export default async function PricingPage() {
   const { userId } = await auth()
@@ -46,47 +48,45 @@ function PaymentClientWrapper({ userId, userEmail }: PaymentClientWrapperProps) 
   const [paymentProvider, setPaymentProvider] = useState<"stripe" | "lemonsqueezy">("stripe")
   const [isLoading, setIsLoading] = useState(false)
 
-  const getPaymentLinks = (provider: "stripe" | "lemonsqueezy") => {
-    if (provider === "stripe") {
-      return {
-        monthly: process.env.NEXT_PUBLIC_STRIPE_PAYMENT_LINK_MONTHLY || "#",
-        yearly: process.env.NEXT_PUBLIC_STRIPE_PAYMENT_LINK_YEARLY || "#"
-      }
-    } else {
-      return {
-        monthly: process.env.NEXT_PUBLIC_LEMONSQUEEZY_CHECKOUT_URL_MONTHLY || "#",
-        yearly: process.env.NEXT_PUBLIC_LEMONSQUEEZY_CHECKOUT_URL_YEARLY || "#"
-      }
-    }
-  }
-
-  const handleCheckout = async (variantId: string) => {
-    if (!userId) {
-      // Handle not logged in state
+  const handleCheckout = async (planType: PlanType) => {
+    if (!userId || !userEmail) {
+      // Redirect to login or show error message
+      alert("Please log in to subscribe")
       return
     }
 
     setIsLoading(true)
     try {
       if (paymentProvider === "lemonsqueezy") {
-        const { checkoutUrl } = await createCheckoutSession({
-          variantId,
-          email: userEmail || undefined,
+        const result = await createLemonSqueezyCheckoutSessionAction(
           userId,
-          successUrl: `${window.location.origin}/dashboard?success=true`,
-          cancelUrl: `${window.location.origin}/pricing?cancelled=true`
-        })
-        window.location.href = checkoutUrl
+          userEmail,
+          planType === "monthly" 
+            ? process.env.LEMONSQUEEZY_VARIANT_ID_MONTHLY!
+            : process.env.LEMONSQUEEZY_VARIANT_ID_YEARLY!
+        )
+
+        if (!result.isSuccess) {
+          throw new Error(result.message)
+        }
+
+        window.location.href = result.data.checkoutUrl
       } else {
-        // Handle Stripe checkout
-        const stripeLinks = getPaymentLinks("stripe")
-        window.location.href = variantId === process.env.LEMONSQUEEZY_VARIANT_ID_MONTHLY
-          ? stripeLinks.monthly
-          : stripeLinks.yearly
+        const result = await createStripeCheckoutSessionAction(
+          userId,
+          userEmail,
+          planType
+        )
+
+        if (!result.isSuccess) {
+          throw new Error(result.message)
+        }
+
+        window.location.href = result.data.checkoutUrl
       }
     } catch (error) {
       console.error("Error creating checkout:", error)
-      // Handle error (show toast, etc.)
+      alert("Failed to create checkout session. Please try again.")
     } finally {
       setIsLoading(false)
     }
@@ -105,8 +105,7 @@ function PaymentClientWrapper({ userId, userEmail }: PaymentClientWrapperProps) 
           price="$10"
           description="Billed monthly"
           buttonText={`Subscribe Monthly with ${paymentProvider === "stripe" ? "Stripe" : "LemonSqueezy"}`}
-          variantId={process.env.LEMONSQUEEZY_VARIANT_ID_MONTHLY || ""}
-          onClick={() => handleCheckout(process.env.LEMONSQUEEZY_VARIANT_ID_MONTHLY || "")}
+          onClick={() => handleCheckout("monthly")}
           isLoading={isLoading}
         />
         <PricingCard
@@ -114,8 +113,7 @@ function PaymentClientWrapper({ userId, userEmail }: PaymentClientWrapperProps) 
           price="$100"
           description="Billed annually"
           buttonText={`Subscribe Yearly with ${paymentProvider === "stripe" ? "Stripe" : "LemonSqueezy"}`}
-          variantId={process.env.LEMONSQUEEZY_VARIANT_ID_YEARLY || ""}
-          onClick={() => handleCheckout(process.env.LEMONSQUEEZY_VARIANT_ID_YEARLY || "")}
+          onClick={() => handleCheckout("yearly")}
           isLoading={isLoading}
         />
       </div>
@@ -128,7 +126,6 @@ interface PricingCardProps {
   price: string
   description: string
   buttonText: string
-  variantId: string
   onClick: () => void
   isLoading: boolean
 }

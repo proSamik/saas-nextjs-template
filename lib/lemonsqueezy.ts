@@ -12,6 +12,16 @@ const LS_API_KEY = process.env.LEMONSQUEEZY_API_KEY!
 const LS_API_URL = "https://api.lemonsqueezy.com/v1"
 const LS_STORE_ID = process.env.LEMONSQUEEZY_STORE_ID!
 
+// Plan IDs
+const VARIANT_IDS = {
+  monthly: process.env.LEMONSQUEEZY_VARIANT_ID_MONTHLY!,
+  yearly: process.env.LEMONSQUEEZY_VARIANT_ID_YEARLY!,
+  credits10: process.env.LEMONSQUEEZY_VARIANT_ID_CREDITS_10
+} as const
+
+export type PlanInterval = 'monthly' | 'yearly'
+export type PlanType = PlanInterval | 'credits'
+
 // API client with required headers
 const lsApiClient = async (endpoint: string, options: RequestInit = {}) => {
   const url = `${LS_API_URL}${endpoint}`
@@ -82,6 +92,63 @@ export async function createCheckoutSession({
   return {
     checkoutUrl: response.data.attributes.url,
     checkoutId: response.data.id
+  }
+}
+
+/**
+ * Creates a checkout session for a specific plan
+ */
+export async function createPlanCheckoutSession({
+  planType,
+  email,
+  userId,
+  successUrl,
+  cancelUrl
+}: Omit<CreateCheckoutOptions, 'variantId'> & { planType: PlanType }) {
+  let variantId: string
+
+  switch (planType) {
+    case 'monthly':
+      variantId = VARIANT_IDS.monthly
+      break
+    case 'yearly':
+      variantId = VARIANT_IDS.yearly
+      break
+    case 'credits':
+      if (!VARIANT_IDS.credits10) {
+        throw new Error('Credits plan variant ID not configured')
+      }
+      variantId = VARIANT_IDS.credits10
+      break
+    default:
+      throw new Error(`Invalid plan type: ${planType}`)
+  }
+
+  return createCheckoutSession({
+    variantId,
+    email,
+    userId,
+    successUrl,
+    cancelUrl
+  })
+}
+
+/**
+ * Get variant ID for a plan type
+ */
+export function getPlanVariantId(planType: PlanType): string {
+  switch (planType) {
+    case 'monthly':
+      return VARIANT_IDS.monthly
+    case 'yearly':
+      return VARIANT_IDS.yearly
+    case 'credits':
+      if (!VARIANT_IDS.credits10) {
+        throw new Error('Credits plan variant ID not configured')
+      }
+      return VARIANT_IDS.credits10
+    default:
+      throw new Error(`Invalid plan type: ${planType}`)
   }
 }
 
@@ -173,7 +240,9 @@ export interface LemonSqueezyCustomer {
 
 export const lemonsqueezy = {
   createCheckoutSession,
+  createPlanCheckoutSession,
   getSubscription,
   getCustomer,
-  getCustomerPortalUrl
+  getCustomerPortalUrl,
+  getPlanVariantId
 }
